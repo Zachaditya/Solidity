@@ -4,122 +4,240 @@ const {
 } = require("@nomicfoundation/hardhat-toolbox/network-helpers");
 const { anyValue } = require("@nomicfoundation/hardhat-chai-matchers/withArgs");
 const { expect } = require("chai");
+describe("BankAccount", function () {
+  async function deployBankAccount() {
+    const [addr0, addr1, addr2, addr3, addr4] = await ethers.getSigners();
 
-describe("Lock", function () {
-  // We define a fixture to reuse the same setup in every test.
-  // We use loadFixture to run this setup once, snapshot that state,
-  // and reset Hardhat Network to that snapshot in every test.
-  async function deployOneYearLockFixture() {
-    const ONE_YEAR_IN_SECS = 365 * 24 * 60 * 60;
-    const ONE_GWEI = 1_000_000_000;
+    const BankAccount = await ethers.getContractFactory("BankAccount");
+    const bankAccount = await BankAccount.deploy();
 
-    const lockedAmount = ONE_GWEI;
-    const unlockTime = (await time.latest()) + ONE_YEAR_IN_SECS;
-
-    // Contracts are deployed using the first signer/account by default
-    const [owner, otherAccount] = await ethers.getSigners();
-
-    const Lock = await ethers.getContractFactory("Lock");
-    const lock = await Lock.deploy(unlockTime, { value: lockedAmount });
-
-    return { lock, unlockTime, lockedAmount, owner, otherAccount };
+    return { bankAccount, addr0, addr1, addr2, addr3, addr4 };
   }
+  async function deployBankAccountWithAccounts(
+    owners = 1,
+    deposit = 0,
+    withdrawalAmounts = []
+  ) {
+    const { bankAccount, addr0, addr1, addr2, addr3, addr4 } =
+      await loadFixture(deployBankAccount);
+    let addresses = [];
 
-  describe("Deployment", function () {
-    it("Should set the right unlockTime", async function () {
-      const { lock, unlockTime } = await loadFixture(deployOneYearLockFixture);
+    if (owners == 2) addresses = [addr1.address];
+    else if (owners == 3) addresses = [addr1.address, addr2.address];
+    else if (owners == 4)
+      addresses = [addr1.address, addr2.address, addr3.address];
 
-      expect(await lock.unlockTime()).to.equal(unlockTime);
-    });
+    await bankAccount.connect(addr0).createAccount(addresses);
 
-    it("Should set the right owner", async function () {
-      const { lock, owner } = await loadFixture(deployOneYearLockFixture);
+    if (deposit > 0) {
+      await bankAccount
+        .connect(addr0)
+        .deposit(0, { value: deposit.toString() });
+    }
 
-      expect(await lock.owner()).to.equal(owner.address);
-    });
+    for (const withdrawalAmount of withdrawalAmounts) {
+      await bankAccount.connect(addr0).requestWithdrawal(0, withdrawalAmount);
+    }
 
-    it("Should receive and store the funds to lock", async function () {
-      const { lock, lockedAmount } = await loadFixture(
-        deployOneYearLockFixture
-      );
-
-      expect(await ethers.provider.getBalance(lock.target)).to.equal(
-        lockedAmount
-      );
-    });
-
-    it("Should fail if the unlockTime is not in the future", async function () {
-      // We don't use the fixture here because we want a different deployment
-      const latestTime = await time.latest();
-      const Lock = await ethers.getContractFactory("Lock");
-      await expect(Lock.deploy(latestTime, { value: 1 })).to.be.revertedWith(
-        "Unlock time should be in the future"
-      );
+    return { bankAccount, addr0, addr1, addr2, addr3, addr4 };
+  }
+  describe("Deployment", () => {
+    it("Deploy without error", async () => {
+      await loadFixture(deployBankAccount);
     });
   });
 
-  describe("Withdrawals", function () {
-    describe("Validations", function () {
-      it("Should revert with the right error if called too soon", async function () {
-        const { lock } = await loadFixture(deployOneYearLockFixture);
+  describe("Creating an account", () => {
+    it("Should allow creating a single user account", async () => {
+      const { bankAccount, addr0 } = await loadFixture(deployBankAccount);
+      await bankAccount.connect(addr0).createAccount([]);
+      const accounts = await bankAccount.connect(addr0).getAccounts();
+      expect(accounts.length).to.equal(1);
+    });
 
-        await expect(lock.withdraw()).to.be.revertedWith(
-          "You can't withdraw yet"
+    it("Should allow creating a double user account", async () => {
+      const { bankAccount, addr0, addr1 } = await loadFixture(
+        deployBankAccount
+      );
+      await bankAccount.connect(addr0).createAccount([addr1.address]);
+
+      const accounts1 = await bankAccount.connect(addr0).getAccounts();
+      expect(accounts1.length).to.equal(1);
+
+      const accounts2 = await bankAccount.connect(addr1).getAccounts();
+      expect(accounts2.length).to.equal(1);
+    });
+
+    it("Should allow creating a triple user account", async () => {
+      const { bankAccount, addr0, addr1, addr2 } = await loadFixture(
+        deployBankAccount
+      );
+      await bankAccount
+        .connect(addr0)
+        .createAccount([addr1.address, addr2.address]);
+
+      const accounts1 = await bankAccount.connect(addr0).getAccounts();
+      expect(accounts1.length).to.equal(1);
+
+      const accounts2 = await bankAccount.connect(addr1).getAccounts();
+      expect(accounts2.length).to.equal(1);
+
+      const accounts3 = await bankAccount.connect(addr2).getAccounts();
+      expect(accounts3.length).to.equal(1);
+    });
+    it("Should not allow duplicates", async () => {
+      const { bankAccount, addr0 } = await loadFixture(deployBankAccount);
+      await expect(bankAccount.connect(addr0).createAccount([addr0.address])).to
+        .be.reverted;
+    });
+    it("Should not allow account with 5 owners", async () => {
+      const { bankAccount, addr0, addr1, addr2, addr3, addr4 } =
+        await loadFixture(deployBankAccount);
+      await expect(
+        bankAccount
+          .connect(addr0)
+          .createAccount([
+            addr0.address,
+            addr1.address,
+            addr2.address,
+            addr3.address,
+            addr4.address,
+          ])
+      ).to.be.reverted;
+    });
+  });
+  describe("Despositing", () => {
+    it("should allow deposit from account owner", async () => {
+      const { bankAccount, addr0 } = await deployBankAccountWithAccounts(1);
+      await expect(
+        bankAccount.connect(addr0).deposit(0, { value: "100" })
+      ).to.changeEtherBalances([bankAccount, addr0], ["100", "-100"]);
+    });
+
+    it("should NOT allow deposit from non-account owner", async () => {
+      const { bankAccount, addr1 } = await deployBankAccountWithAccounts(1);
+      await expect(bankAccount.connect(addr1).deposit(0, { value: "100" })).to
+        .be.reverted;
+    });
+  });
+
+  describe("Withdraw", () => {
+    describe("Request a withdraw", () => {
+      it("account owner can request withdraw", async () => {
+        const { bankAccount, addr0 } = await deployBankAccountWithAccounts(
+          1,
+          100
         );
+        await bankAccount.connect(addr0).requestWithdrawal(0, 100);
       });
 
-      it("Should revert with the right error if called from another account", async function () {
-        const { lock, unlockTime, otherAccount } = await loadFixture(
-          deployOneYearLockFixture
+      it("account owner can not request withdraw with invalid amount", async () => {
+        const { bankAccount, addr0 } = await deployBankAccountWithAccounts(
+          1,
+          100
         );
-
-        // We can increase the time in Hardhat Network
-        await time.increaseTo(unlockTime);
-
-        // We use lock.connect() to send a transaction from another account
-        await expect(lock.connect(otherAccount).withdraw()).to.be.revertedWith(
-          "You aren't the owner"
-        );
+        await expect(bankAccount.connect(addr0).requestWithdrawal(0, 101)).to.be
+          .reverted;
       });
 
-      it("Shouldn't fail if the unlockTime has arrived and the owner calls it", async function () {
-        const { lock, unlockTime } = await loadFixture(
-          deployOneYearLockFixture
+      it("non-account owner cannot request withdraw", async () => {
+        const { bankAccount, addr1 } = await deployBankAccountWithAccounts(
+          1,
+          100
         );
+        await expect(bankAccount.connect(addr1).requestWithdrawal(0, 90)).to.be
+          .reverted;
+      });
 
-        // Transactions are sent using the first signer by default
-        await time.increaseTo(unlockTime);
+      it("non-account owner cannot request withdraw", async () => {
+        const { bankAccount, addr0 } = await deployBankAccountWithAccounts(
+          1,
+          100
+        );
+        await bankAccount.connect(addr0).requestWithdrawal(0, 90);
+        await bankAccount.connect(addr0).requestWithdrawal(0, 10);
+      });
+    });
+    describe("Approve a withdraw", () => {
+      it("should allow account owner to approve withdraw", async () => {
+        const { bankAccount, addr1 } = await deployBankAccountWithAccounts(
+          2,
+          100,
+          [100]
+        );
+        await bankAccount.connect(addr1).approveWithdrawal(0, 0);
+        expect(await bankAccount.getApprovals(0, 0)).to.equal(1);
+      });
 
-        await expect(lock.withdraw()).not.to.be.reverted;
+      it("should not allow non-account owner to approve withdraw", async () => {
+        const { bankAccount, addr2 } = await deployBankAccountWithAccounts(
+          2,
+          100,
+          [100]
+        );
+        await expect(bankAccount.connect(addr2).approveWithdrawal(0, 0)).to.be
+          .reverted;
+      });
+
+      it("should not allow owner to approve withdrawal multiple times", async () => {
+        const { bankAccount, addr1 } = await deployBankAccountWithAccounts(
+          2,
+          100,
+          [100]
+        );
+        bankAccount.connect(addr1).approveWithdrawal(0, 0);
+        await expect(bankAccount.connect(addr1).approveWithdrawal(0, 0)).to.be
+          .reverted;
+      });
+
+      it("should not allow creator of request to approve request", async () => {
+        const { bankAccount, addr0 } = await deployBankAccountWithAccounts(
+          2,
+          100,
+          [100]
+        );
+        await expect(bankAccount.connect(addr0).approveWithdrawal(0, 0)).to.be
+          .reverted;
       });
     });
 
-    describe("Events", function () {
-      it("Should emit an event on withdrawals", async function () {
-        const { lock, unlockTime, lockedAmount } = await loadFixture(
-          deployOneYearLockFixture
-        );
-
-        await time.increaseTo(unlockTime);
-
-        await expect(lock.withdraw())
-          .to.emit(lock, "Withdrawal")
-          .withArgs(lockedAmount, anyValue); // We accept any value as `when` arg
+    describe("Make withdraw", () => {
+      it("should allow creator of request to withdraw approved request", async () => {
+        const { bankAccount, addr0, addr1 } =
+          await deployBankAccountWithAccounts(2, 100, [100]);
+        await bankAccount.connect(addr1).approveWithdrawal(0, 0);
+        await expect(
+          bankAccount.connect(addr0).withdraw(0, 0)
+        ).to.changeEtherBalances([bankAccount, addr0], ["-100", "100"]);
       });
-    });
 
-    describe("Transfers", function () {
-      it("Should transfer the funds to the owner", async function () {
-        const { lock, unlockTime, lockedAmount, owner } = await loadFixture(
-          deployOneYearLockFixture
+      it("should not allow creator of request to withdraw approved request twice", async () => {
+        const { bankAccount, addr0, addr1 } =
+          await deployBankAccountWithAccounts(2, 200, [100]);
+        await bankAccount.connect(addr1).approveWithdrawal(0, 0);
+        await expect(
+          bankAccount.connect(addr0).withdraw(0, 0)
+        ).to.changeEtherBalances([bankAccount, addr0], ["-100", "100"]);
+        await expect(bankAccount.connect(addr0).withdraw(0, 0)).to.be.reverted;
+      });
+
+      it("should not allow non-creator of request to withdraw approved request ", async () => {
+        const { bankAccount, addr1 } = await deployBankAccountWithAccounts(
+          2,
+          200,
+          [100]
         );
+        await bankAccount.connect(addr1).approveWithdrawal(0, 0);
+        await expect(bankAccount.connect(addr1).withdraw(0, 0)).to.be.reverted;
+      });
 
-        await time.increaseTo(unlockTime);
-
-        await expect(lock.withdraw()).to.changeEtherBalances(
-          [owner, lock],
-          [lockedAmount, -lockedAmount]
+      it("should not allow non-creator of request to withdraw approved request ", async () => {
+        const { bankAccount, addr0 } = await deployBankAccountWithAccounts(
+          2,
+          200,
+          [100]
         );
+        await expect(bankAccount.connect(addr0).withdraw(0, 0)).to.be.reverted;
       });
     });
   });
